@@ -42,9 +42,23 @@ def generate_test_description():
             executable='opennav_docking',
             name='docking_server',
             parameters=[{'wait_charge_timeout': 1.0,
+                         'approach_target_projection': 0.04,
                          'controller': {
                              'use_collision_detection': False,
                              'transform_tolerance': 0.5,
+                             'use_holonomic': True,
+                             'holonomic_k_y': 2.8,
+                             'holonomic_k_yaw': 2.2,
+                             'holonomic_v_lateral_min': 0.02,
+                             'holonomic_v_lateral_max': 0.15,
+                             'holonomic_v_angular_min': 0.12,
+                             'holonomic_slowdown_lateral_radius': 0.08,
+                             'holonomic_slowdown_yaw_radius': 0.18,
+                             'holonomic_deadband_lateral': 0.001,
+                             'holonomic_deadband_yaw': 0.005,
+                             'holonomic_x_gate_lateral_error': 0.04,
+                             'holonomic_x_gate_yaw_error': 0.15,
+                             'holonomic_x_gate_min_scale': 0.15,
                          },
                          'dock_plugins': ['test_dock_plugin'],
                          'test_dock_plugin': {
@@ -91,14 +105,19 @@ class TestDockingServer(unittest.TestCase):
         rclpy.shutdown()
 
     def command_velocity_callback(self, msg):
-        self.node.get_logger().info('Command: %f %f' % (msg.linear.x, msg.angular.z))
+        self.node.get_logger().info(
+            'Command: %f %f %f' % (msg.linear.x, msg.linear.y, msg.angular.z))
         self.command = msg
 
     def timer_callback(self):
         # Propagate command
         period = 0.05
-        self.x += cos(self.theta) * self.command.linear.x * period
-        self.y += sin(self.theta) * self.command.linear.x * period
+        self.x += (
+            cos(self.theta) * self.command.linear.x -
+            sin(self.theta) * self.command.linear.y) * period
+        self.y += (
+            sin(self.theta) * self.command.linear.x +
+            cos(self.theta) * self.command.linear.y) * period
         self.theta += self.command.angular.z * period
         # Need to publish updated TF
         self.publish()
@@ -150,7 +169,6 @@ class TestDockingServer(unittest.TestCase):
         self.publish()
 
         result = NavigateToPose.Result()
-        result.error_code = 0
         return result
 
     def test_docking_server(self):

@@ -12,13 +12,60 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cmath>
 
+#include "angles/angles.h"
 #include "nav2_util/node_utils.hpp"
 #include "opennav_docking/simple_charging_dock.hpp"
 
 namespace opennav_docking
 {
+
+namespace
+{
+
+bool transformPoseWithLatestFallback(
+  const std::shared_ptr<tf2_ros::Buffer> & tf2_buffer,
+  const geometry_msgs::msg::PoseStamped & input,
+  geometry_msgs::msg::PoseStamped & output,
+  const std::string & target_frame,
+  const rclcpp::Duration & timeout)
+{
+  if (!tf2_buffer) {
+    return false;
+  }
+
+  if (input.header.frame_id == target_frame) {
+    output = input;
+    return true;
+  }
+
+  try {
+    if (tf2_buffer->canTransform(
+        target_frame, input.header.frame_id, input.header.stamp, timeout))
+    {
+      tf2_buffer->transform(input, output, target_frame);
+      return true;
+    }
+  } catch (const tf2::TransformException &) {
+    // Fall back to the latest available transform below.
+  }
+
+  try {
+    const auto transform = tf2_buffer->lookupTransform(
+      target_frame, input.header.frame_id, tf2::TimePointZero,
+      tf2::durationFromSec(timeout.seconds()));
+    tf2::doTransform(input, output, transform);
+    output.header.frame_id = target_frame;
+    output.header.stamp = input.header.stamp;
+    return true;
+  } catch (const tf2::TransformException &) {
+    return false;
+  }
+}
+
+}  // namespace
 
 void SimpleChargingDock::configure(
   const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
@@ -45,6 +92,14 @@ void SimpleChargingDock::configure(
     node_, name + ".external_detection_translation_x", rclcpp::ParameterValue(-0.20));
   nav2_util::declare_parameter_if_not_declared(
     node_, name + ".external_detection_translation_y", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".external_detection_use_relative_target_pose", rclcpp::ParameterValue(false));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".external_detection_target_x", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".external_detection_target_y", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".external_detection_target_yaw", rclcpp::ParameterValue(0.0));
   nav2_util::declare_parameter_if_not_declared(
     node_, name + ".external_detection_rotation_yaw", rclcpp::ParameterValue(0.0));
   nav2_util::declare_parameter_if_not_declared(
@@ -77,6 +132,8 @@ void SimpleChargingDock::configure(
     node_, name + ".staging_x_offset", rclcpp::ParameterValue(-0.7));
   nav2_util::declare_parameter_if_not_declared(
     node_, name + ".staging_yaw_offset", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, "base_frame", rclcpp::ParameterValue("base_link"));
 
   node_->get_parameter(name + ".use_battery_status", use_battery_status_);
   node_->get_parameter(name + ".use_external_detection_pose", use_external_detection_pose_);
@@ -85,6 +142,12 @@ void SimpleChargingDock::configure(
     name + ".external_detection_translation_x", external_detection_translation_x_);
   node_->get_parameter(
     name + ".external_detection_translation_y", external_detection_translation_y_);
+  node_->get_parameter(
+    name + ".external_detection_use_relative_target_pose",
+    external_detection_use_relative_target_pose_);
+  node_->get_parameter(name + ".external_detection_target_x", external_detection_target_x_);
+  node_->get_parameter(name + ".external_detection_target_y", external_detection_target_y_);
+  node_->get_parameter(name + ".external_detection_target_yaw", external_detection_target_yaw_);
   double yaw, pitch, roll;
   node_->get_parameter(name + ".external_detection_rotation_yaw", yaw);
   node_->get_parameter(name + ".external_detection_rotation_pitch", pitch);
@@ -94,9 +157,26 @@ void SimpleChargingDock::configure(
   node_->get_parameter(name + ".stall_velocity_threshold", stall_velocity_threshold_);
   node_->get_parameter(name + ".stall_effort_threshold", stall_effort_threshold_);
   node_->get_parameter(name + ".docking_threshold", docking_threshold_);
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".docking_threshold_x", rclcpp::ParameterValue(-1.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".docking_threshold_y", rclcpp::ParameterValue(-1.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".docking_threshold_yaw", rclcpp::ParameterValue(-1.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".docking_settle_hits_required", rclcpp::ParameterValue(1));
+  nav2_util::declare_parameter_if_not_declared(
+    node_, name + ".docking_settle_duration_s", rclcpp::ParameterValue(0.0));
+  node_->get_parameter(name + ".docking_threshold_x", docking_threshold_x_);
+  node_->get_parameter(name + ".docking_threshold_y", docking_threshold_y_);
+  node_->get_parameter(name + ".docking_threshold_yaw", docking_threshold_yaw_);
+  node_->get_parameter(name + ".docking_settle_hits_required", docking_settle_hits_required_);
+  node_->get_parameter(name + ".docking_settle_duration_s", docking_settle_duration_s_);
   node_->get_parameter(name + ".staging_x_offset", staging_x_offset_);
   node_->get_parameter(name + ".staging_yaw_offset", staging_yaw_offset_);
   node_->get_parameter("base_frame", base_frame_id_);  // Get server base frame ID
+  docking_candidate_hits_ = 0;
+  docking_candidate_first_stamp_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
 
   // Setup filter
   double filter_coef;
@@ -193,24 +273,16 @@ bool SimpleChargingDock::getRefinedPose(geometry_msgs::msg::PoseStamped & pose)
   // is the output of detection, but also acts as the initial estimate
   // and contains the frame_id of docking
   if (detected.header.frame_id != pose.header.frame_id) {
-    try {
-      if (!tf2_buffer_->canTransform(
-          pose.header.frame_id, detected.header.frame_id,
-          detected.header.stamp, rclcpp::Duration::from_seconds(0.2)))
-      {
-        RCLCPP_WARN(
-          node_->get_logger(), "Failed to transform detected dock pose: "
-          "cannot transform %s to %s (at time %2.2f s)",
-          detected.header.frame_id.c_str(),
-          pose.header.frame_id.c_str(),
-          static_cast<float>(
-            detected.header.stamp.sec + detected.header.stamp.nanosec * 1e-9
-        ));
-        return false;
-      }
-      tf2_buffer_->transform(detected, detected, pose.header.frame_id);
-    } catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN(node_->get_logger(), "Failed to transform detected dock pose: %s", ex.what());
+    if (!transformPoseWithLatestFallback(
+        tf2_buffer_, detected, detected, pose.header.frame_id,
+        rclcpp::Duration::from_seconds(0.2)))
+    {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Failed to transform detected dock pose from %s to %s at stamp %.2f",
+        detected.header.frame_id.c_str(),
+        pose.header.frame_id.c_str(),
+        static_cast<float>(detected.header.stamp.sec + detected.header.stamp.nanosec * 1e-9));
       return false;
     }
   }
@@ -227,23 +299,84 @@ bool SimpleChargingDock::getRefinedPose(geometry_msgs::msg::PoseStamped & pose)
   tf2::doTransform(just_orientation, just_orientation, transform);
 
   tf2::Quaternion orientation;
-  orientation.setEuler(0.0, 0.0, tf2::getYaw(just_orientation.pose.orientation));
-  dock_pose_.pose.orientation = tf2::toMsg(orientation);
+  const double adjusted_marker_yaw = tf2::getYaw(just_orientation.pose.orientation);
 
   // Construct dock_pose_ by applying translation/rotation
   dock_pose_.header = detected.header;
   dock_pose_.pose.position = detected.pose.position;
-  const double yaw = tf2::getYaw(dock_pose_.pose.orientation);
-  dock_pose_.pose.position.x += cos(yaw) * external_detection_translation_x_ -
-    sin(yaw) * external_detection_translation_y_;
-  dock_pose_.pose.position.y += sin(yaw) * external_detection_translation_x_ +
-    cos(yaw) * external_detection_translation_y_;
+  double dock_yaw = adjusted_marker_yaw;
+  if (external_detection_use_relative_target_pose_) {
+    dock_yaw = angles::normalize_angle(adjusted_marker_yaw - external_detection_target_yaw_);
+    dock_pose_.pose.position.x -=
+      std::cos(dock_yaw) * external_detection_target_x_ -
+      std::sin(dock_yaw) * external_detection_target_y_;
+    dock_pose_.pose.position.y -=
+      std::sin(dock_yaw) * external_detection_target_x_ +
+      std::cos(dock_yaw) * external_detection_target_y_;
+  } else {
+    dock_yaw = adjusted_marker_yaw;
+    dock_pose_.pose.position.x += cos(dock_yaw) * external_detection_translation_x_ -
+      sin(dock_yaw) * external_detection_translation_y_;
+    dock_pose_.pose.position.y += sin(dock_yaw) * external_detection_translation_x_ +
+      cos(dock_yaw) * external_detection_translation_y_;
+  }
+  orientation.setEuler(0.0, 0.0, dock_yaw);
+  dock_pose_.pose.orientation = tf2::toMsg(orientation);
   dock_pose_.pose.position.z = 0.0;
 
   // Publish & return dock pose for debugging purposes
   dock_pose_pub_->publish(dock_pose_);
   pose = dock_pose_;
   return true;
+}
+
+bool SimpleChargingDock::getCurrentRelativeMarkerPose(geometry_msgs::msg::PoseStamped & pose) const
+{
+  if (!use_external_detection_pose_) {
+    return false;
+  }
+
+  geometry_msgs::msg::PoseStamped detected = detected_dock_pose_;
+  if (detected.header.frame_id.empty()) {
+    return false;
+  }
+
+  const auto timeout = rclcpp::Duration::from_seconds(external_detection_timeout_);
+  if (node_->now() - detected.header.stamp > timeout) {
+    return false;
+  }
+
+  if (detected.header.frame_id == base_frame_id_) {
+    pose = detected;
+    return true;
+  }
+
+  if (!tf2_buffer_) {
+    return false;
+  }
+
+  try {
+    if (!tf2_buffer_->canTransform(
+        base_frame_id_, detected.header.frame_id,
+        detected.header.stamp, rclcpp::Duration::from_seconds(0.2)))
+    {
+      return false;
+    }
+    tf2_buffer_->transform(detected, pose, base_frame_id_);
+    return true;
+  } catch (const tf2::TransformException &) {
+    try {
+      const auto transform = tf2_buffer_->lookupTransform(
+        base_frame_id_, detected.header.frame_id, tf2::TimePointZero,
+        tf2::durationFromSec(0.2));
+      tf2::doTransform(detected, pose, transform);
+      pose.header.frame_id = base_frame_id_;
+      pose.header.stamp = detected.header.stamp;
+      return true;
+    } catch (const tf2::TransformException &) {
+      return false;
+    }
+  }
 }
 
 bool SimpleChargingDock::isDocked()
@@ -258,22 +391,95 @@ bool SimpleChargingDock::isDocked()
     return false;
   }
 
-  // Find base pose in target frame
+  const bool inside_window = isInsideDockingWindowRaw();
+
+  if (!inside_window) {
+    docking_candidate_hits_ = 0;
+    docking_candidate_first_stamp_ = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
+    return false;
+  }
+
+  if (docking_candidate_hits_ == 0) {
+    docking_candidate_first_stamp_ = node_->now();
+  }
+  ++docking_candidate_hits_;
+
+  const bool hits_ok = docking_candidate_hits_ >= std::max(1, docking_settle_hits_required_);
+  const bool duration_ok =
+    docking_settle_duration_s_ <= 0.0 ||
+    (node_->now() - docking_candidate_first_stamp_).seconds() >= docking_settle_duration_s_;
+  return hits_ok && duration_ok;
+}
+
+bool SimpleChargingDock::isInsideDockingWindowRaw() const
+{
+  if (dock_pose_.header.frame_id.empty()) {
+    return false;
+  }
+
+  if (use_external_detection_pose_ && external_detection_use_relative_target_pose_) {
+    double x_error = 0.0;
+    double y_error = 0.0;
+    double yaw_error = 0.0;
+    if (!getRelativeTargetErrorsRaw(x_error, y_error, yaw_error)) {
+      return false;
+    }
+
+    if (docking_threshold_x_ > 0.0 && docking_threshold_y_ > 0.0 && docking_threshold_yaw_ > 0.0) {
+      return
+        std::abs(x_error) < docking_threshold_x_ &&
+        std::abs(y_error) < docking_threshold_y_ &&
+        std::abs(yaw_error) < docking_threshold_yaw_;
+    }
+    return std::hypot(x_error, y_error) < docking_threshold_;
+  }
+
   geometry_msgs::msg::PoseStamped base_pose;
   base_pose.header.stamp = rclcpp::Time(0);
   base_pose.header.frame_id = base_frame_id_;
   base_pose.pose.orientation.w = 1.0;
   try {
     tf2_buffer_->transform(base_pose, base_pose, dock_pose_.header.frame_id);
-  } catch (const tf2::TransformException & ex) {
+  } catch (const tf2::TransformException &) {
     return false;
   }
 
-  // If we are close enough, pretend we are charging
-  double d = std::hypot(
-    base_pose.pose.position.x - dock_pose_.pose.position.x,
-    base_pose.pose.position.y - dock_pose_.pose.position.y);
-  return d < docking_threshold_;
+  const double dx_world = base_pose.pose.position.x - dock_pose_.pose.position.x;
+  const double dy_world = base_pose.pose.position.y - dock_pose_.pose.position.y;
+  const double dock_yaw = tf2::getYaw(dock_pose_.pose.orientation);
+  const double base_yaw = tf2::getYaw(base_pose.pose.orientation);
+  const double cos_yaw = std::cos(dock_yaw);
+  const double sin_yaw = std::sin(dock_yaw);
+  const double x_error = cos_yaw * dx_world + sin_yaw * dy_world;
+  const double y_error = -sin_yaw * dx_world + cos_yaw * dy_world;
+  const double yaw_error = angles::shortest_angular_distance(base_yaw, dock_yaw);
+
+  if (docking_threshold_x_ > 0.0 && docking_threshold_y_ > 0.0 && docking_threshold_yaw_ > 0.0) {
+    return
+      std::abs(x_error) < docking_threshold_x_ &&
+      std::abs(y_error) < docking_threshold_y_ &&
+      std::abs(yaw_error) < docking_threshold_yaw_;
+  }
+  return std::hypot(dx_world, dy_world) < docking_threshold_;
+}
+
+bool SimpleChargingDock::getRelativeTargetErrorsRaw(
+  double & x_error, double & y_error, double & yaw_error) const
+{
+  if (!use_external_detection_pose_ || !external_detection_use_relative_target_pose_) {
+    return false;
+  }
+
+  geometry_msgs::msg::PoseStamped marker_pose_in_base;
+  if (!getCurrentRelativeMarkerPose(marker_pose_in_base)) {
+    return false;
+  }
+
+  x_error = marker_pose_in_base.pose.position.x - external_detection_target_x_;
+  y_error = marker_pose_in_base.pose.position.y - external_detection_target_y_;
+  const double marker_yaw = tf2::getYaw(marker_pose_in_base.pose.orientation);
+  yaw_error = angles::shortest_angular_distance(marker_yaw, external_detection_target_yaw_);
+  return true;
 }
 
 bool SimpleChargingDock::isCharging()

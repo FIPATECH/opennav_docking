@@ -76,12 +76,14 @@ TEST(DatabaseTests, initializeBogusPlugins)
   auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("test");
   std::vector<std::string> plugins{"dockv1", "dockv2"};
   node->declare_parameter("dock_plugins", rclcpp::ParameterValue(plugins));
+  node->declare_parameter("dockv1.plugin", rclcpp::ParameterValue("bogus_plugin_type_one"));
+  node->declare_parameter("dockv2.plugin", rclcpp::ParameterValue("bogus_plugin_type_two"));
   opennav_docking::DockDatabase db;
-  db.initialize(node, nullptr);
+  EXPECT_FALSE(db.initialize(node, nullptr));
 
   plugins.clear();
   node->set_parameter(rclcpp::Parameter("dock_plugins", rclcpp::ParameterValue(plugins)));
-  db.initialize(node, nullptr);
+  EXPECT_FALSE(db.initialize(node, nullptr));
 }
 
 TEST(DatabaseTests, findTests)

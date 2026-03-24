@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "rclcpp/time.hpp"
 #include "sensor_msgs/msg/battery_state.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
@@ -89,6 +90,24 @@ public:
   virtual bool isDocked();
 
   /**
+   * @brief Check the raw x/y/yaw docking window without settle counters.
+   * Useful for deciding whether a restaging maneuver is still worth doing.
+   * @return True if the latest pose is inside the configured docking window.
+   */
+  bool isInsideDockingWindowRaw() const;
+
+  /**
+   * @brief Get the latest relative target errors in base_link coordinates when
+   * using relative target pose validation.
+   * @param x_error Forward error relative to the configured target pose.
+   * @param y_error Lateral error relative to the configured target pose.
+   * @param yaw_error Heading error relative to the configured target pose.
+   * @return True if the errors could be computed from the current detection.
+   */
+  bool getRelativeTargetErrorsRaw(
+    double & x_error, double & y_error, double & yaw_error) const;
+
+  /**
    * @copydoc opennav_docking_core::ChargingDock::isCharging
    */
   virtual bool isCharging();
@@ -103,7 +122,8 @@ public:
    */
   virtual bool hasStoppedCharging();
 
-protected:
+ protected:
+  bool getCurrentRelativeMarkerPose(geometry_msgs::msg::PoseStamped & pose) const;
   void jointStateCallback(const sensor_msgs::msg::JointState::SharedPtr state);
 
   // Optionally subscribe to a detected dock pose topic
@@ -134,6 +154,10 @@ protected:
   tf2::Quaternion external_detection_rotation_;
   double external_detection_translation_x_;
   double external_detection_translation_y_;
+  bool external_detection_use_relative_target_pose_{false};
+  double external_detection_target_x_{0.0};
+  double external_detection_target_y_{0.0};
+  double external_detection_target_yaw_{0.0};
 
   // Filtering of detected poses
   std::shared_ptr<PoseFilter> filter_;
@@ -142,6 +166,11 @@ protected:
   double charging_threshold_;
   // If not using an external pose reference, this is the distance threshold
   double docking_threshold_;
+  double docking_threshold_x_;
+  double docking_threshold_y_;
+  double docking_threshold_yaw_;
+  int docking_settle_hits_required_;
+  double docking_settle_duration_s_;
   std::string base_frame_id_;
   // Offset for staging pose relative to dock pose
   double staging_x_offset_;
@@ -149,6 +178,8 @@ protected:
 
   rclcpp_lifecycle::LifecycleNode::SharedPtr node_;
   std::shared_ptr<tf2_ros::Buffer> tf2_buffer_;
+  int docking_candidate_hits_{0};
+  rclcpp::Time docking_candidate_first_stamp_{0, 0, RCL_SYSTEM_TIME};
 };
 
 }  // namespace opennav_docking

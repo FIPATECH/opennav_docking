@@ -14,6 +14,7 @@
 
 #include "angles/angles.h"
 #include "opennav_docking/docking_server.hpp"
+#include "opennav_docking/simple_charging_dock.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "tf2/utils.h"
 
@@ -41,9 +42,25 @@ DockingServer::DockingServer(const rclcpp::NodeOptions & options)
   declare_parameter("fixed_frame", "odom");
   declare_parameter("dock_backwards", false);
   declare_parameter("dock_prestaging_tolerance", 0.5);
+  declare_parameter("refined_dock_prestaging_tolerance", 0.1);
+  declare_parameter("restage_on_refined_detection", true);
+  declare_parameter("initial_stage_continue_max_x_error", 0.24);
+  declare_parameter("initial_stage_continue_max_y_error", 0.05);
+  declare_parameter("initial_stage_continue_max_yaw_error", 0.18);
+  declare_parameter("refined_restaging_handoff_max_x_error", 0.08);
+  declare_parameter("refined_restaging_handoff_max_y_error", 0.03);
+  declare_parameter("refined_restaging_handoff_max_yaw_error", 0.12);
+  declare_parameter("direct_control_handoff_max_x_error", 0.34);
+  declare_parameter("direct_control_handoff_max_y_error", 0.03);
+  declare_parameter("direct_control_handoff_max_yaw_error", 0.12);
+  declare_parameter("wait_charge_reengage_max_x_error", 0.30);
+  declare_parameter("wait_charge_reengage_max_y_error", 0.06);
+  declare_parameter("wait_charge_reengage_max_yaw_error", 0.25);
   declare_parameter("odom_topic", "odom");
   declare_parameter("rotation_angular_tolerance", 0.05);
   declare_parameter("rotate_to_dock", false);
+  declare_parameter("approach_target_projection", 0.25);
+  declare_parameter("invert_cmd_vel_angular_z", false);
 }
 
 nav2_util::CallbackReturn
@@ -64,9 +81,60 @@ DockingServer::on_configure(const rclcpp_lifecycle::State & /*state*/)
   get_parameter("fixed_frame", fixed_frame_);
   get_parameter("dock_backwards", dock_backwards_);
   get_parameter("dock_prestaging_tolerance", dock_prestaging_tolerance_);
+  get_parameter("refined_dock_prestaging_tolerance", refined_dock_prestaging_tolerance_);
+  get_parameter("restage_on_refined_detection", restage_on_refined_detection_);
+  get_parameter("initial_stage_continue_max_x_error", initial_stage_continue_max_x_error_);
+  get_parameter("initial_stage_continue_max_y_error", initial_stage_continue_max_y_error_);
+  get_parameter("initial_stage_continue_max_yaw_error", initial_stage_continue_max_yaw_error_);
+  get_parameter("refined_restaging_handoff_max_x_error", refined_restaging_handoff_max_x_error_);
+  get_parameter("refined_restaging_handoff_max_y_error", refined_restaging_handoff_max_y_error_);
+  get_parameter(
+    "refined_restaging_handoff_max_yaw_error", refined_restaging_handoff_max_yaw_error_);
+  get_parameter("direct_control_handoff_max_x_error", direct_control_handoff_max_x_error_);
+  get_parameter("direct_control_handoff_max_y_error", direct_control_handoff_max_y_error_);
+  get_parameter("direct_control_handoff_max_yaw_error", direct_control_handoff_max_yaw_error_);
+  get_parameter("wait_charge_reengage_max_x_error", wait_charge_reengage_max_x_error_);
+  get_parameter("wait_charge_reengage_max_y_error", wait_charge_reengage_max_y_error_);
+  get_parameter("wait_charge_reengage_max_yaw_error", wait_charge_reengage_max_yaw_error_);
   get_parameter("rotation_angular_tolerance", rotation_angular_tolerance_);
+  get_parameter("approach_target_projection", approach_target_projection_);
+  get_parameter("invert_cmd_vel_angular_z", invert_cmd_vel_angular_z_);
 
   RCLCPP_INFO(get_logger(), "Controller frequency set to %.4fHz", controller_frequency_);
+  RCLCPP_INFO(
+    get_logger(), "Docking cmd_vel angular.z mode: %s",
+    invert_cmd_vel_angular_z_ ? "inverted" : "passthrough");
+  RCLCPP_INFO(
+    get_logger(), "Dock charge confirmation timeout=%.3f",
+    wait_charge_timeout_);
+  RCLCPP_INFO(
+    get_logger(), "Dock refined re-staging: %s (tol=%.3f)",
+    restage_on_refined_detection_ ? "enabled" : "disabled",
+    refined_dock_prestaging_tolerance_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Dock initial-stage recovery window: |x|<=%.3f |y|<=%.3f |yaw|<=%.3f",
+    initial_stage_continue_max_x_error_,
+    initial_stage_continue_max_y_error_,
+    initial_stage_continue_max_yaw_error_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Dock refined handoff window: |x|<=%.3f |y|<=%.3f |yaw|<=%.3f",
+    refined_restaging_handoff_max_x_error_,
+    refined_restaging_handoff_max_y_error_,
+    refined_restaging_handoff_max_yaw_error_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Dock direct-control handoff window: |x|<=%.3f |y|<=%.3f |yaw|<=%.3f",
+    direct_control_handoff_max_x_error_,
+    direct_control_handoff_max_y_error_,
+    direct_control_handoff_max_yaw_error_);
+  RCLCPP_INFO(
+    get_logger(),
+    "Dock wait-charge re-engage window: |x|<=%.3f |y|<=%.3f |yaw|<=%.3f",
+    wait_charge_reengage_max_x_error_,
+    wait_charge_reengage_max_y_error_,
+    wait_charge_reengage_max_yaw_error_);
 
   vel_publisher_ = create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 1);
   tf2_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
@@ -259,27 +327,53 @@ void DockingServer::dockRobot()
     publishDockingFeedback(DockRobot::Feedback::NAV_TO_STAGING_POSE);
     const auto initial_staging_pose = dock->getStagingPose();
     const auto robot_pose = getRobotPoseInFrame(initial_staging_pose.header.frame_id);
-    if (!goal->navigate_to_staging_pose ||
+    const bool skip_initial_stage_from_live_target =
+      goal->navigate_to_staging_pose && canProceedAfterFailedRefinedRestage(dock);
+    if (skip_initial_stage_from_live_target) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Skipping initial staging because the live target is already inside the refined "
+        "handoff window");
+    } else if (
+      !goal->navigate_to_staging_pose ||
       utils::l2Norm(robot_pose.pose, initial_staging_pose.pose) < dock_prestaging_tolerance_)
     {
       RCLCPP_INFO(get_logger(), "Robot already within pre-staging pose tolerance for dock");
     } else {
-      navigator_->goToPose(
-        initial_staging_pose, rclcpp::Duration::from_seconds(goal->max_staging_time));
-      RCLCPP_INFO(get_logger(), "Successful navigation to staging pose");
+      try {
+        navigator_->goToPose(
+          initial_staging_pose, rclcpp::Duration::from_seconds(goal->max_staging_time));
+        RCLCPP_INFO(get_logger(), "Successful navigation to staging pose");
+      } catch (const opennav_docking_core::FailedToStage &) {
+        if (canProceedAfterFailedRefinedRestage(dock)) {
+          RCLCPP_WARN(
+            get_logger(),
+            "Initial staging navigation did not report success, but live target is already "
+            "inside the docking handoff window; continuing to perception");
+        } else if (canContinueAfterFailedInitialStage(dock)) {
+          RCLCPP_WARN(
+            get_logger(),
+            "Initial staging navigation did not report success, but live target is "
+            "inside the recovery window; continuing to perception and refined re-staging");
+        } else {
+          throw;
+        }
+      }
     }
 
     // Construct initial estimate of where the dock is located in fixed_frame
     auto dock_pose = utils::getDockPoseStamped(dock, rclcpp::Time(0));
     tf2_buffer_->transform(dock_pose, dock_pose, fixed_frame_);
 
-    // Get initial detection of dock before proceeding to move
+    // Get initial detection of dock before proceeding to move.
     doInitialPerception(dock, dock_pose);
     RCLCPP_INFO(get_logger(), "Successful initial dock detection");
+    maybeRestageOnRefinedDockPose(dock, dock_pose, goal, initial_staging_pose.header.frame_id);
 
     // If we performed a rotation before docking backward, we must rotate the staging pose
-    // to match the robot orientation
-    auto staging_pose = dock->getStagingPose();
+    // to match the robot orientation.
+    auto staging_pose = computeStagingPoseFromRefinedDockPose(
+      dock, dock_pose, initial_staging_pose.header.frame_id);
     if (rotate_to_dock_) {
       staging_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
         tf2::getYaw(staging_pose.pose.orientation) + M_PI);
@@ -297,7 +391,7 @@ void DockingServer::dockRobot()
         if (approachDock(dock, dock_pose)) {
           // We are docked, wait for charging to begin
           RCLCPP_INFO(get_logger(), "Made contact with dock, waiting for charge to start");
-          if (waitForCharge(dock)) {
+          if (waitForCharge(dock, dock_pose)) {
             RCLCPP_INFO(get_logger(), "Robot is charging!");
             result->success = true;
             result->num_retries = num_retries_;
@@ -321,7 +415,13 @@ void DockingServer::dockRobot()
         RCLCPP_WARN(get_logger(), "Docking failed, will retry: %s", e.what());
       }
 
-      // Reset to staging pose to try again
+      // Reset to the latest perception-refined staging pose to try again.
+      staging_pose = computeStagingPoseFromRefinedDockPose(
+        dock, dock_pose, initial_staging_pose.header.frame_id);
+      if (rotate_to_dock_) {
+        staging_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
+          tf2::getYaw(staging_pose.pose.orientation) + M_PI);
+      }
       if (!resetApproach(staging_pose)) {
         // Cancelled, preempted, or shutting down
         stashDockData(goal->use_dock_id, dock, false);
@@ -410,6 +510,168 @@ void DockingServer::doInitialPerception(Dock * dock, geometry_msgs::msg::PoseSta
   }
 }
 
+geometry_msgs::msg::PoseStamped DockingServer::computeStagingPoseFromRefinedDockPose(
+  Dock * dock, const geometry_msgs::msg::PoseStamped & dock_pose, const std::string & frame)
+{
+  auto staging_source = dock_pose;
+  const std::string target_frame = frame.empty() ? dock_pose.header.frame_id : frame;
+  if (staging_source.header.frame_id != target_frame) {
+    tf2_buffer_->transform(staging_source, staging_source, target_frame);
+  }
+  return dock->plugin->getStagingPose(staging_source.pose, staging_source.header.frame_id);
+}
+
+void DockingServer::maybeRestageOnRefinedDockPose(
+  Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose,
+  std::shared_ptr<const DockRobot::Goal> goal, const std::string & staging_frame)
+{
+  if (!goal->navigate_to_staging_pose || !restage_on_refined_detection_) {
+    return;
+  }
+
+  auto simple_dock = std::dynamic_pointer_cast<SimpleChargingDock>(dock->plugin);
+  if (simple_dock && simple_dock->isInsideDockingWindowRaw()) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Skipping perception-refined staging because the latest target is already inside "
+      "the raw docking window");
+    return;
+  }
+
+  if (canProceedDirectlyAfterInitialPerception(dock)) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Skipping perception-refined staging because the latest target is already inside "
+      "the direct holonomic control window");
+    return;
+  }
+
+  auto refined_staging_pose = computeStagingPoseFromRefinedDockPose(dock, dock_pose, staging_frame);
+  const auto robot_pose = getRobotPoseInFrame(refined_staging_pose.header.frame_id);
+  const double refined_staging_error =
+    utils::l2Norm(robot_pose.pose, refined_staging_pose.pose);
+  if (refined_staging_error < refined_dock_prestaging_tolerance_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Robot already within refined pre-staging tolerance for dock (error=%.3f < %.3f)",
+      refined_staging_error, refined_dock_prestaging_tolerance_);
+    return;
+  }
+
+  publishDockingFeedback(DockRobot::Feedback::NAV_TO_STAGING_POSE);
+  try {
+    navigator_->goToPose(
+      refined_staging_pose, rclcpp::Duration::from_seconds(goal->max_staging_time));
+    RCLCPP_INFO(
+      get_logger(),
+      "Successful navigation to perception-refined staging pose (error=%.3f)",
+      refined_staging_error);
+    doInitialPerception(dock, dock_pose);
+    RCLCPP_INFO(get_logger(), "Successful dock re-detection after refined staging");
+  } catch (const opennav_docking_core::FailedToStage &) {
+    doInitialPerception(dock, dock_pose);
+    if (canProceedDirectlyAfterInitialPerception(dock)) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Refined staging navigation did not report success, but live target is already "
+        "inside the direct holonomic control window; continuing to local docking control");
+      return;
+    }
+    if (canProceedAfterFailedRefinedRestage(dock)) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Refined staging navigation did not report success, but live target is already "
+        "inside the docking handoff window; continuing to local docking control");
+      return;
+    }
+    throw;
+  }
+}
+
+bool DockingServer::canProceedAfterFailedRefinedRestage(Dock * dock)
+{
+  return isLiveTargetInsideWindow(
+    dock,
+    refined_restaging_handoff_max_x_error_,
+    refined_restaging_handoff_max_y_error_,
+    refined_restaging_handoff_max_yaw_error_,
+    "Refined staging failure handoff");
+}
+
+bool DockingServer::canProceedDirectlyAfterInitialPerception(Dock * dock)
+{
+  return isLiveTargetInsideWindow(
+    dock,
+    direct_control_handoff_max_x_error_,
+    direct_control_handoff_max_y_error_,
+    direct_control_handoff_max_yaw_error_,
+    "Direct-control handoff");
+}
+
+bool DockingServer::canContinueAfterFailedInitialStage(Dock * dock)
+{
+  return isLiveTargetInsideWindow(
+    dock,
+    initial_stage_continue_max_x_error_,
+    initial_stage_continue_max_y_error_,
+    initial_stage_continue_max_yaw_error_,
+    "Initial staging failure recovery");
+}
+
+bool DockingServer::computeApproachCommand(
+  const geometry_msgs::msg::PoseStamped & dock_pose, geometry_msgs::msg::Twist & command)
+{
+  // Transform target_pose into base_link frame
+  geometry_msgs::msg::PoseStamped target_pose = dock_pose;
+  target_pose.header.stamp = rclcpp::Time(0);
+
+  // The control law can get jittery when close to the end when atan2's can explode.
+  // Thus, we backward project the controller's target pose a little bit after the
+  // dock so that the robot never gets to the end of the spiral before its in contact
+  // with the dock to stop the docking procedure.
+  const double backward_projection = approach_target_projection_;
+  const double yaw = tf2::getYaw(target_pose.pose.orientation);
+  target_pose.pose.position.x += cos(yaw) * backward_projection;
+  target_pose.pose.position.y += sin(yaw) * backward_projection;
+  tf2_buffer_->transform(target_pose, target_pose, base_frame_);
+
+  // Make sure that the target pose is pointing at the robot when moving backwards.
+  if (dock_backwards_) {
+    target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
+      tf2::getYaw(target_pose.pose.orientation) + M_PI);
+  }
+
+  return controller_->computeVelocityCommand(target_pose.pose, command, true, dock_backwards_);
+}
+
+bool DockingServer::isLiveTargetInsideWindow(
+  Dock * dock, double max_x, double max_y, double max_yaw, const char * label)
+{
+  auto simple_dock = std::dynamic_pointer_cast<SimpleChargingDock>(dock->plugin);
+  if (!simple_dock) {
+    return false;
+  }
+
+  double x_error = 0.0;
+  double y_error = 0.0;
+  double yaw_error = 0.0;
+  if (!simple_dock->getRelativeTargetErrorsRaw(x_error, y_error, yaw_error)) {
+    return false;
+  }
+
+  const bool inside_window =
+    std::abs(x_error) <= max_x &&
+    std::abs(y_error) <= max_y &&
+    std::abs(yaw_error) <= max_yaw;
+
+  RCLCPP_INFO(
+    get_logger(),
+    "%s check: x=%.3f y=%.3f yaw=%.3f limits=(%.3f, %.3f, %.3f) -> %s",
+    label, x_error, y_error, yaw_error, max_x, max_y, max_yaw,
+    inside_window ? "proceed" : "abort");
+  return inside_window;
+}
+
 void DockingServer::rotateToDock(const geometry_msgs::msg::PoseStamped & dock_pose)
 {
   const double dt = 1.0 / controller_frequency_;
@@ -435,7 +697,7 @@ void DockingServer::rotateToDock(const geometry_msgs::msg::PoseStamped & dock_po
     auto command = controller_->computeRotateToHeadingCommand(
       angular_distance_to_heading, current_vel, dt);
 
-    vel_publisher_->publish(command);
+    publishVelocityCommand(command);
 
     if (this->now() - start > timeout) {
       throw opennav_docking_core::FailedToControl("Timed out rotating to dock");
@@ -453,11 +715,6 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
   while (rclcpp::ok()) {
     publishDockingFeedback(DockRobot::Feedback::CONTROLLING);
 
-    // Stop and report success if connected to dock
-    if (dock->plugin->isDocked() || dock->plugin->isCharging()) {
-      return true;
-    }
-
     // Stop if cancelled/preempted
     if (checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
       checkAndWarnIfPreempted(docking_action_server_, "dock_robot"))
@@ -470,33 +727,17 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
       throw opennav_docking_core::FailedToDetectDock("Failed dock detection");
     }
 
-    // Transform target_pose into base_link frame
-    geometry_msgs::msg::PoseStamped target_pose = dock_pose;
-    target_pose.header.stamp = rclcpp::Time(0);
-
-    // The control law can get jittery when close to the end when atan2's can explode.
-    // Thus, we backward project the controller's target pose a little bit after the
-    // dock so that the robot never gets to the end of the spiral before its in contact
-    // with the dock to stop the docking procedure.
-    const double backward_projection = 0.25;
-    const double yaw = tf2::getYaw(target_pose.pose.orientation);
-    target_pose.pose.position.x += cos(yaw) * backward_projection;
-    target_pose.pose.position.y += sin(yaw) * backward_projection;
-    tf2_buffer_->transform(target_pose, target_pose, base_frame_);
-
-    // Make sure that the target pose is pointing at the robot when moving backwards
-    // This is to ensure that the robot doesn't try to dock from the wrong side
-    if (dock_backwards_) {
-      target_pose.pose.orientation = nav2_util::geometry_utils::orientationAroundZAxis(
-        tf2::getYaw(target_pose.pose.orientation) + M_PI);
+    // Evaluate the success window using the freshest perception update.
+    if (dock->plugin->isDocked() || dock->plugin->isCharging()) {
+      return true;
     }
 
     // Compute and publish controls
     geometry_msgs::msg::Twist command;
-    if (!controller_->computeVelocityCommand(target_pose.pose, command, true, dock_backwards_)) {
+    if (!computeApproachCommand(dock_pose, command)) {
       throw opennav_docking_core::FailedToControl("Failed to get control");
     }
-    vel_publisher_->publish(command);
+    publishVelocityCommand(command);
 
     if (this->now() - start > timeout) {
       throw opennav_docking_core::FailedToControl(
@@ -508,7 +749,7 @@ bool DockingServer::approachDock(Dock * dock, geometry_msgs::msg::PoseStamped & 
   return false;
 }
 
-bool DockingServer::waitForCharge(Dock * dock)
+bool DockingServer::waitForCharge(Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose)
 {
   rclcpp::Rate loop_rate(controller_frequency_);
   auto start = this->now();
@@ -518,6 +759,31 @@ bool DockingServer::waitForCharge(Dock * dock)
 
     if (dock->plugin->isCharging()) {
       return true;
+    }
+
+    auto simple_dock = std::dynamic_pointer_cast<SimpleChargingDock>(dock->plugin);
+    if (simple_dock && dock->plugin->getRefinedPose(dock_pose)) {
+      if (!simple_dock->isInsideDockingWindowRaw()) {
+        if (!isLiveTargetInsideWindow(
+            dock,
+            wait_charge_reengage_max_x_error_,
+            wait_charge_reengage_max_y_error_,
+            wait_charge_reengage_max_yaw_error_,
+            "Wait-charge re-engage"))
+        {
+          throw opennav_docking_core::FailedToCharge(
+                  "Lost the docking window while waiting for charge");
+        }
+
+        geometry_msgs::msg::Twist command;
+        if (!computeApproachCommand(dock_pose, command)) {
+          throw opennav_docking_core::FailedToControl(
+                  "Failed to get control while waiting for charge");
+        }
+        publishVelocityCommand(command);
+      } else {
+        publishZeroVelocity();
+      }
     }
 
     if (checkAndWarnIfCancelled(docking_action_server_, "dock_robot") ||
@@ -558,7 +824,7 @@ bool DockingServer::resetApproach(const geometry_msgs::msg::PoseStamped & stagin
     {
       return true;
     }
-    vel_publisher_->publish(command);
+    publishVelocityCommand(command);
 
     if (this->now() - start > timeout) {
       throw opennav_docking_core::FailedToControl("Timed out resetting dock approach");
@@ -697,7 +963,7 @@ void DockingServer::undockRobot()
 
         // Have reached staging_pose
         RCLCPP_INFO(get_logger(), "Robot has reached staging pose");
-        vel_publisher_->publish(command);
+        publishVelocityCommand(command);
         if (dock->hasStoppedCharging()) {
           RCLCPP_INFO(get_logger(), "Robot has undocked!");
           result->success = true;
@@ -711,7 +977,7 @@ void DockingServer::undockRobot()
       }
 
       // Publish command and sleep
-      vel_publisher_->publish(command);
+      publishVelocityCommand(command);
       loop_rate.sleep();
     }
   } catch (const tf2::TransformException & e) {
@@ -746,7 +1012,16 @@ geometry_msgs::msg::PoseStamped DockingServer::getRobotPoseInFrame(const std::st
 
 void DockingServer::publishZeroVelocity()
 {
-  vel_publisher_->publish(geometry_msgs::msg::Twist());
+  publishVelocityCommand(geometry_msgs::msg::Twist());
+}
+
+void DockingServer::publishVelocityCommand(const geometry_msgs::msg::Twist & cmd)
+{
+  auto out = cmd;
+  if (invert_cmd_vel_angular_z_) {
+    out.angular.z = -out.angular.z;
+  }
+  vel_publisher_->publish(out);
 }
 
 void DockingServer::publishDockingFeedback(uint16_t state)
@@ -781,6 +1056,32 @@ DockingServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> paramete
         undock_angular_tolerance_ = parameter.as_double();
       } else if (name == "rotation_angular_tolerance") {
         rotation_angular_tolerance_ = parameter.as_double();
+      } else if (name == "refined_dock_prestaging_tolerance") {
+        refined_dock_prestaging_tolerance_ = parameter.as_double();
+      } else if (name == "initial_stage_continue_max_x_error") {
+        initial_stage_continue_max_x_error_ = parameter.as_double();
+      } else if (name == "initial_stage_continue_max_y_error") {
+        initial_stage_continue_max_y_error_ = parameter.as_double();
+      } else if (name == "initial_stage_continue_max_yaw_error") {
+        initial_stage_continue_max_yaw_error_ = parameter.as_double();
+      } else if (name == "refined_restaging_handoff_max_x_error") {
+        refined_restaging_handoff_max_x_error_ = parameter.as_double();
+      } else if (name == "refined_restaging_handoff_max_y_error") {
+        refined_restaging_handoff_max_y_error_ = parameter.as_double();
+      } else if (name == "refined_restaging_handoff_max_yaw_error") {
+        refined_restaging_handoff_max_yaw_error_ = parameter.as_double();
+      } else if (name == "direct_control_handoff_max_x_error") {
+        direct_control_handoff_max_x_error_ = parameter.as_double();
+      } else if (name == "direct_control_handoff_max_y_error") {
+        direct_control_handoff_max_y_error_ = parameter.as_double();
+      } else if (name == "direct_control_handoff_max_yaw_error") {
+        direct_control_handoff_max_yaw_error_ = parameter.as_double();
+      } else if (name == "wait_charge_reengage_max_x_error") {
+        wait_charge_reengage_max_x_error_ = parameter.as_double();
+      } else if (name == "wait_charge_reengage_max_y_error") {
+        wait_charge_reengage_max_y_error_ = parameter.as_double();
+      } else if (name == "wait_charge_reengage_max_yaw_error") {
+        wait_charge_reengage_max_yaw_error_ = parameter.as_double();
       }
     } else if (type == ParameterType::PARAMETER_STRING) {
       if (name == "base_frame") {
@@ -791,6 +1092,12 @@ DockingServer::dynamicParametersCallback(std::vector<rclcpp::Parameter> paramete
     } else if (type == ParameterType::PARAMETER_INTEGER) {
       if (name == "max_retries") {
         max_retries_ = parameter.as_int();
+      }
+    } else if (type == ParameterType::PARAMETER_BOOL) {
+      if (name == "invert_cmd_vel_angular_z") {
+        invert_cmd_vel_angular_z_ = parameter.as_bool();
+      } else if (name == "restage_on_refined_detection") {
+        restage_on_refined_detection_ = parameter.as_bool();
       }
     }
   }

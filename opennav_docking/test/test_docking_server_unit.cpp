@@ -197,9 +197,19 @@ TEST(DockingServerTests, testDynamicParams)
       rclcpp::Parameter("wait_charge_timeout", 1.2),
       rclcpp::Parameter("undock_linear_tolerance", 0.25),
       rclcpp::Parameter("undock_angular_tolerance", 0.125),
+      rclcpp::Parameter("initial_stage_continue_max_x_error", 0.21),
+      rclcpp::Parameter("initial_stage_continue_max_y_error", 0.04),
+      rclcpp::Parameter("initial_stage_continue_max_yaw_error", 0.15),
+      rclcpp::Parameter("direct_control_handoff_max_x_error", 0.31),
+      rclcpp::Parameter("direct_control_handoff_max_y_error", 0.06),
+      rclcpp::Parameter("direct_control_handoff_max_yaw_error", 0.22),
+      rclcpp::Parameter("wait_charge_reengage_max_x_error", 0.29),
+      rclcpp::Parameter("wait_charge_reengage_max_y_error", 0.05),
+      rclcpp::Parameter("wait_charge_reengage_max_yaw_error", 0.21),
       rclcpp::Parameter("base_frame", std::string("hi")),
       rclcpp::Parameter("fixed_frame", std::string("hi")),
-      rclcpp::Parameter("max_retries", 7)});
+      rclcpp::Parameter("max_retries", 7),
+      rclcpp::Parameter("invert_cmd_vel_angular_z", true)});
 
   rclcpp::spin_until_future_complete(
     node->get_node_base_interface(),
@@ -210,9 +220,19 @@ TEST(DockingServerTests, testDynamicParams)
   EXPECT_EQ(node->get_parameter("wait_charge_timeout").as_double(), 1.2);
   EXPECT_EQ(node->get_parameter("undock_linear_tolerance").as_double(), 0.25);
   EXPECT_EQ(node->get_parameter("undock_angular_tolerance").as_double(), 0.125);
+  EXPECT_EQ(node->get_parameter("initial_stage_continue_max_x_error").as_double(), 0.21);
+  EXPECT_EQ(node->get_parameter("initial_stage_continue_max_y_error").as_double(), 0.04);
+  EXPECT_EQ(node->get_parameter("initial_stage_continue_max_yaw_error").as_double(), 0.15);
+  EXPECT_EQ(node->get_parameter("direct_control_handoff_max_x_error").as_double(), 0.31);
+  EXPECT_EQ(node->get_parameter("direct_control_handoff_max_y_error").as_double(), 0.06);
+  EXPECT_EQ(node->get_parameter("direct_control_handoff_max_yaw_error").as_double(), 0.22);
+  EXPECT_EQ(node->get_parameter("wait_charge_reengage_max_x_error").as_double(), 0.29);
+  EXPECT_EQ(node->get_parameter("wait_charge_reengage_max_y_error").as_double(), 0.05);
+  EXPECT_EQ(node->get_parameter("wait_charge_reengage_max_yaw_error").as_double(), 0.21);
   EXPECT_EQ(node->get_parameter("base_frame").as_string(), std::string("hi"));
   EXPECT_EQ(node->get_parameter("fixed_frame").as_string(), std::string("hi"));
   EXPECT_EQ(node->get_parameter("max_retries").as_int(), 7);
+  EXPECT_TRUE(node->get_parameter("invert_cmd_vel_angular_z").as_bool());
 }
 
 }  // namespace opennav_docking

@@ -83,6 +83,78 @@ public:
   void doInitialPerception(Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose);
 
   /**
+   * @brief Compute a staging pose from the latest refined dock pose, optionally
+   * transformed into a requested frame for navigation or reset.
+   * @param dock Dock instance whose plugin owns the staging geometry.
+   * @param dock_pose Latest refined dock pose.
+   * @param frame Target frame for the returned staging pose. If empty, the dock
+   * pose frame is preserved.
+   * @return Staging pose built from the refined dock pose.
+   */
+  geometry_msgs::msg::PoseStamped computeStagingPoseFromRefinedDockPose(
+    Dock * dock, const geometry_msgs::msg::PoseStamped & dock_pose, const std::string & frame);
+
+  /**
+   * @brief If enabled, re-stage to the perception-refined staging pose before
+   * entering the local docking loop.
+   * @param dock Dock instance whose plugin owns the staging geometry.
+   * @param dock_pose Latest refined dock pose, refreshed again if navigation occurs.
+   * @param goal Current docking action goal.
+   * @param staging_frame Frame to use for the staging pose.
+   */
+  void maybeRestageOnRefinedDockPose(
+    Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose,
+    std::shared_ptr<const DockRobot::Goal> goal, const std::string & staging_frame);
+
+  /**
+   * @brief Check whether the current live target geometry is good enough to
+   * continue into perception and refined restaging even if the initial Nav2
+   * staging request did not report success.
+   * @param dock Dock instance whose plugin can expose current target errors.
+   * @return True if the current live target is inside the configured recovery window.
+   */
+  bool canContinueAfterFailedInitialStage(Dock * dock);
+
+  /**
+   * @brief Check whether the current live target geometry is already good
+   * enough to hand over to the local docking controller even if Nav2 staging
+   * did not report success.
+   * @param dock Dock instance whose plugin can expose current target errors.
+   * @return True if the current live target is inside the configured handoff window.
+   */
+  bool canProceedAfterFailedRefinedRestage(Dock * dock);
+
+  /**
+   * @brief Check whether the current live target is already inside a direct
+   * holonomic control window right after the first perception update.
+   * @param dock Dock instance whose plugin can expose current target errors.
+   * @return True if refined re-staging can be skipped and the local controller
+   * should take over immediately.
+   */
+  bool canProceedDirectlyAfterInitialPerception(Dock * dock);
+
+  /**
+   * @brief Evaluate the current live target against an explicit x/y/yaw window.
+   * @param dock Dock instance whose plugin can expose current target errors.
+   * @param max_x Maximum tolerated absolute x error.
+   * @param max_y Maximum tolerated absolute y error.
+   * @param max_yaw Maximum tolerated absolute yaw error.
+   * @param label Human-readable label for logs.
+   * @return True if the live target is inside the supplied window.
+   */
+  bool isLiveTargetInsideWindow(
+    Dock * dock, double max_x, double max_y, double max_yaw, const char * label);
+
+  /**
+   * @brief Compute a local approach command from the latest refined dock pose.
+   * @param dock_pose Latest refined dock pose.
+   * @param command Output velocity command.
+   * @return True if a valid command could be produced.
+   */
+  bool computeApproachCommand(
+    const geometry_msgs::msg::PoseStamped & dock_pose, geometry_msgs::msg::Twist & command);
+
+  /**
    * @brief Use control law and dock perception to approach the charge dock.
    * @param dock Dock instance, gets queried for refined pose and docked state.
    * @param dock_pose Initial dock pose, will be refined by perception.
@@ -102,7 +174,7 @@ public:
    * @param dock Dock instance, used to query isCharging().
    * @returns True if charging successfully started within alloted time.
    */
-  bool waitForCharge(Dock * dock);
+  bool waitForCharge(Dock * dock, geometry_msgs::msg::PoseStamped & dock_pose);
 
   /**
    * @brief Reset the robot for another approach by controlling back to staging pose.
@@ -205,6 +277,12 @@ public:
    */
   void publishZeroVelocity();
 
+  /**
+   * @brief Publish a velocity command using the configured output axis conventions.
+   * @param cmd Velocity command in ROS standard body-frame conventions.
+   */
+  void publishVelocityCommand(const geometry_msgs::msg::Twist & cmd);
+
 protected:
   /**
    * @brief Main action callback method to complete docking request
@@ -254,8 +332,38 @@ protected:
   bool rotate_to_dock_;
   // The tolerance to the dock's staging pose not requiring navigation
   double dock_prestaging_tolerance_;
+  // Tighter tolerance used after initial perception to decide whether a
+  // perception-refined staging navigation is still needed.
+  double refined_dock_prestaging_tolerance_;
+  // Whether to re-stage on the live perceived dock pose before the final approach.
+  bool restage_on_refined_detection_;
+  // If the initial Nav2 staging request fails but the live target is still within
+  // a broader engagement envelope, continue into perception and refined restaging
+  // instead of aborting immediately.
+  double initial_stage_continue_max_x_error_;
+  double initial_stage_continue_max_y_error_;
+  double initial_stage_continue_max_yaw_error_;
+  // If Nav2 staging fails but the live target is already close enough for the
+  // local docking controller, continue instead of aborting immediately.
+  double refined_restaging_handoff_max_x_error_;
+  double refined_restaging_handoff_max_y_error_;
+  double refined_restaging_handoff_max_yaw_error_;
+  // If the first perception update is already inside this window, skip refined
+  // re-staging and enter the local docking controller directly.
+  double direct_control_handoff_max_x_error_;
+  double direct_control_handoff_max_y_error_;
+  double direct_control_handoff_max_yaw_error_;
+  // While waiting for charge after a transient contact, keep nudging the robot
+  // locally as long as the target stays inside this broader recovery window.
+  double wait_charge_reengage_max_x_error_;
+  double wait_charge_reengage_max_y_error_;
+  double wait_charge_reengage_max_yaw_error_;
   // Angular tolerance to exit the rotation loop when rotate_to_dock is enabled
   double rotation_angular_tolerance_;
+  // Projection applied past the nominal dock pose to smooth the final approach
+  double approach_target_projection_;
+  // Match the local controller convention used elsewhere in the stack
+  bool invert_cmd_vel_angular_z_;
 
   // This is a class member so it can be accessed in publish feedback
   rclcpp::Time action_start_time_;

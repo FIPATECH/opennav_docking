@@ -107,6 +107,7 @@ ament_target_dependencies(simple_charging_dock
   ${dependencies}
 )
 target_link_libraries(simple_charging_dock pose_filter)
+target_link_libraries(${library_name} simple_charging_dock)
 
 pluginlib_export_plugin_description_file(opennav_docking_core plugins.xml)
 
