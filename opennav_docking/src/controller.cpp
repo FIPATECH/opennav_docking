@@ -50,6 +50,42 @@ Controller::Controller(
   nav2_util::declare_parameter_if_not_declared(
     node, "controller.slowdown_radius", rclcpp::ParameterValue(0.25));
   nav2_util::declare_parameter_if_not_declared(
+    node, "controller.use_holonomic", rclcpp::ParameterValue(false));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_k_x", rclcpp::ParameterValue(2.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_k_y", rclcpp::ParameterValue(2.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_k_yaw", rclcpp::ParameterValue(2.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_v_linear_min", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_v_linear_max", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_v_lateral_min", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_v_lateral_max", rclcpp::ParameterValue(0.12));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_v_angular_min", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_slowdown_x_radius", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_slowdown_lateral_radius", rclcpp::ParameterValue(0.10));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_slowdown_yaw_radius", rclcpp::ParameterValue(0.20));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_deadband_x", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_deadband_lateral", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_deadband_yaw", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_x_gate_lateral_error", rclcpp::ParameterValue(0.05));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_x_gate_yaw_error", rclcpp::ParameterValue(0.25));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "controller.holonomic_x_gate_min_scale", rclcpp::ParameterValue(0.0));
+  nav2_util::declare_parameter_if_not_declared(
     node, "controller.rotate_to_heading_angular_vel", rclcpp::ParameterValue(1.0));
   nav2_util::declare_parameter_if_not_declared(
     node, "controller.rotate_to_heading_max_angular_accel", rclcpp::ParameterValue(3.2));
@@ -78,9 +114,51 @@ Controller::Controller(
   node->get_parameter("controller.v_linear_max", v_linear_max_);
   node->get_parameter("controller.v_angular_max", v_angular_max_);
   node->get_parameter("controller.slowdown_radius", slowdown_radius_);
+  node->get_parameter("controller.use_holonomic", use_holonomic_);
+  node->get_parameter("controller.holonomic_k_x", holonomic_k_x_);
+  node->get_parameter("controller.holonomic_k_y", holonomic_k_y_);
+  node->get_parameter("controller.holonomic_k_yaw", holonomic_k_yaw_);
+  node->get_parameter("controller.holonomic_v_linear_min", holonomic_v_linear_min_);
+  node->get_parameter("controller.holonomic_v_linear_max", holonomic_v_linear_max_);
+  node->get_parameter("controller.holonomic_v_lateral_min", holonomic_v_lateral_min_);
+  node->get_parameter("controller.holonomic_v_lateral_max", holonomic_v_lateral_max_);
+  node->get_parameter("controller.holonomic_v_angular_min", holonomic_v_angular_min_);
+  node->get_parameter(
+    "controller.holonomic_slowdown_x_radius", holonomic_slowdown_x_radius_);
+  node->get_parameter(
+    "controller.holonomic_slowdown_lateral_radius", holonomic_slowdown_lateral_radius_);
+  node->get_parameter(
+    "controller.holonomic_slowdown_yaw_radius", holonomic_slowdown_yaw_radius_);
+  node->get_parameter("controller.holonomic_deadband_x", holonomic_deadband_x_);
+  node->get_parameter("controller.holonomic_deadband_lateral", holonomic_deadband_lateral_);
+  node->get_parameter("controller.holonomic_deadband_yaw", holonomic_deadband_yaw_);
+  node->get_parameter(
+    "controller.holonomic_x_gate_lateral_error", holonomic_x_gate_lateral_error_);
+  node->get_parameter("controller.holonomic_x_gate_yaw_error", holonomic_x_gate_yaw_error_);
+  node->get_parameter("controller.holonomic_x_gate_min_scale", holonomic_x_gate_min_scale_);
   control_law_ = std::make_unique<nav2_graceful_controller::SmoothControlLaw>(
     k_phi_, k_delta_, beta_, lambda_, slowdown_radius_, v_linear_min_, v_linear_max_,
     v_angular_max_);
+  control_law_->setHolonomicConfig(
+    nav2_graceful_controller::SmoothControlLaw::HolonomicConfig{
+      use_holonomic_,
+      holonomic_k_x_,
+      holonomic_k_y_,
+      holonomic_k_yaw_,
+      holonomic_v_linear_min_,
+      holonomic_v_linear_max_,
+      holonomic_v_lateral_min_,
+      holonomic_v_lateral_max_,
+      holonomic_v_angular_min_,
+      holonomic_slowdown_x_radius_,
+      holonomic_slowdown_lateral_radius_,
+      holonomic_slowdown_yaw_radius_,
+      holonomic_deadband_x_,
+      holonomic_deadband_lateral_,
+      holonomic_deadband_yaw_,
+      holonomic_x_gate_lateral_error_,
+      holonomic_x_gate_yaw_error_,
+      holonomic_x_gate_min_scale_});
 
   // Add callback for dynamic parameters
   dyn_params_handler_ = node->add_on_set_parameters_callback(
@@ -261,6 +339,40 @@ Controller::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
         v_angular_max_ = parameter.as_double();
       } else if (name == "controller.slowdown_radius") {
         slowdown_radius_ = parameter.as_double();
+      } else if (name == "controller.holonomic_k_x") {
+        holonomic_k_x_ = parameter.as_double();
+      } else if (name == "controller.holonomic_k_y") {
+        holonomic_k_y_ = parameter.as_double();
+      } else if (name == "controller.holonomic_k_yaw") {
+        holonomic_k_yaw_ = parameter.as_double();
+      } else if (name == "controller.holonomic_v_linear_min") {
+        holonomic_v_linear_min_ = parameter.as_double();
+      } else if (name == "controller.holonomic_v_linear_max") {
+        holonomic_v_linear_max_ = parameter.as_double();
+      } else if (name == "controller.holonomic_v_lateral_min") {
+        holonomic_v_lateral_min_ = parameter.as_double();
+      } else if (name == "controller.holonomic_v_lateral_max") {
+        holonomic_v_lateral_max_ = parameter.as_double();
+      } else if (name == "controller.holonomic_v_angular_min") {
+        holonomic_v_angular_min_ = parameter.as_double();
+      } else if (name == "controller.holonomic_slowdown_x_radius") {
+        holonomic_slowdown_x_radius_ = parameter.as_double();
+      } else if (name == "controller.holonomic_slowdown_lateral_radius") {
+        holonomic_slowdown_lateral_radius_ = parameter.as_double();
+      } else if (name == "controller.holonomic_slowdown_yaw_radius") {
+        holonomic_slowdown_yaw_radius_ = parameter.as_double();
+      } else if (name == "controller.holonomic_deadband_x") {
+        holonomic_deadband_x_ = parameter.as_double();
+      } else if (name == "controller.holonomic_deadband_lateral") {
+        holonomic_deadband_lateral_ = parameter.as_double();
+      } else if (name == "controller.holonomic_deadband_yaw") {
+        holonomic_deadband_yaw_ = parameter.as_double();
+      } else if (name == "controller.holonomic_x_gate_lateral_error") {
+        holonomic_x_gate_lateral_error_ = parameter.as_double();
+      } else if (name == "controller.holonomic_x_gate_yaw_error") {
+        holonomic_x_gate_yaw_error_ = parameter.as_double();
+      } else if (name == "controller.holonomic_x_gate_min_scale") {
+        holonomic_x_gate_min_scale_ = parameter.as_double();
       } else if (name == "controller.rotate_to_heading_angular_vel") {
         rotate_to_heading_angular_vel_ = parameter.as_double();
       } else if (name == "controller.rotate_to_heading_max_angular_accel") {
@@ -277,6 +389,50 @@ Controller::dynamicParametersCallback(std::vector<rclcpp::Parameter> parameters)
       control_law_->setCurvatureConstants(k_phi_, k_delta_, beta_, lambda_);
       control_law_->setSlowdownRadius(slowdown_radius_);
       control_law_->setSpeedLimit(v_linear_min_, v_linear_max_, v_angular_max_);
+      control_law_->setHolonomicConfig(
+        nav2_graceful_controller::SmoothControlLaw::HolonomicConfig{
+          use_holonomic_,
+          holonomic_k_x_,
+          holonomic_k_y_,
+          holonomic_k_yaw_,
+          holonomic_v_linear_min_,
+          holonomic_v_linear_max_,
+          holonomic_v_lateral_min_,
+          holonomic_v_lateral_max_,
+          holonomic_v_angular_min_,
+          holonomic_slowdown_x_radius_,
+          holonomic_slowdown_lateral_radius_,
+          holonomic_slowdown_yaw_radius_,
+          holonomic_deadband_x_,
+          holonomic_deadband_lateral_,
+          holonomic_deadband_yaw_,
+          holonomic_x_gate_lateral_error_,
+          holonomic_x_gate_yaw_error_,
+          holonomic_x_gate_min_scale_});
+    } else if (type == rcl_interfaces::msg::ParameterType::PARAMETER_BOOL) {
+      if (name == "controller.use_holonomic") {
+        use_holonomic_ = parameter.as_bool();
+        control_law_->setHolonomicConfig(
+          nav2_graceful_controller::SmoothControlLaw::HolonomicConfig{
+            use_holonomic_,
+            holonomic_k_x_,
+            holonomic_k_y_,
+            holonomic_k_yaw_,
+            holonomic_v_linear_min_,
+            holonomic_v_linear_max_,
+            holonomic_v_lateral_min_,
+            holonomic_v_lateral_max_,
+            holonomic_v_angular_min_,
+            holonomic_slowdown_x_radius_,
+            holonomic_slowdown_lateral_radius_,
+            holonomic_slowdown_yaw_radius_,
+            holonomic_deadband_x_,
+            holonomic_deadband_lateral_,
+            holonomic_deadband_yaw_,
+            holonomic_x_gate_lateral_error_,
+            holonomic_x_gate_yaw_error_,
+            holonomic_x_gate_min_scale_});
+      }
     }
   }
 

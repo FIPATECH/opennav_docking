@@ -122,6 +122,15 @@ protected:
   std::unique_ptr<nav2_graceful_controller::SmoothControlLaw> control_law_;
   double k_phi_, k_delta_, beta_, lambda_;
   double slowdown_radius_, v_linear_min_, v_linear_max_, v_angular_max_;
+  bool use_holonomic_;
+  double holonomic_k_x_, holonomic_k_y_, holonomic_k_yaw_;
+  double holonomic_v_linear_min_, holonomic_v_linear_max_;
+  double holonomic_v_lateral_min_, holonomic_v_lateral_max_, holonomic_v_angular_min_;
+  double holonomic_slowdown_x_radius_, holonomic_slowdown_lateral_radius_,
+    holonomic_slowdown_yaw_radius_;
+  double holonomic_deadband_x_, holonomic_deadband_lateral_, holonomic_deadband_yaw_;
+  double holonomic_x_gate_lateral_error_, holonomic_x_gate_yaw_error_;
+  double holonomic_x_gate_min_scale_;
   double rotate_to_heading_angular_vel_, rotate_to_heading_max_angular_accel_;
 
   // The trajectory of the robot while dock / undock for visualization / debug purposes
